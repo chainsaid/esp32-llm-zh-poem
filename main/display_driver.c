@@ -6,7 +6,6 @@
 
 static const char *TAG = "display_driver";
 
-// If no board model is explicitly defined in sdkconfig, default to Waveshare Touch LCD 2
 #if !defined(CONFIG_BOARD_MODEL_SSD1306_I2C) && !defined(CONFIG_BOARD_MODEL_HEADLESS)
 #ifndef CONFIG_BOARD_MODEL_WAVESHARE_TOUCH_LCD_2
 #define CONFIG_BOARD_MODEL_WAVESHARE_TOUCH_LCD_2 1
@@ -22,6 +21,7 @@ static const char *TAG = "display_driver";
 #include "esp_lcd_panel_ops.h"
 #include "esp_heap_caps.h"
 #include "llama.h"
+#include "zh_font_16x16.h"
 
 #ifndef CONFIG_LCD_SPI_MOSI
 #define CONFIG_LCD_SPI_MOSI    38
@@ -62,24 +62,24 @@ static const char *TAG = "display_driver";
 #define COLOR_GREEN            0x07E0
 #define COLOR_GOLD             0xFEA0
 #define COLOR_ORANGE           0xFD20
+#define COLOR_BG_DARK          0x10A2
 
 #define SWAP_COLOR(c)          ((uint16_t)((((uint16_t)(c) >> 8) & 0xFF) | (((uint16_t)(c) & 0xFF) << 8)))
 
 static esp_lcd_panel_handle_t panel_handle = NULL;
 static bool display_ready = false;
 
-// Persistent DMA-safe buffers for UI sections to avoid async DMA memory races
+// Persistent DMA-safe frame buffers
 #define STATS_W 280
-#define STATS_H 52
+#define STATS_H 42
 static uint16_t *stats_card_buf = NULL;
 
 #define HEADER_W 320
 #define HEADER_H 30
 static uint16_t *header_bar_buf = NULL;
 
-#define STATUS_BOX_W 280
-#define STATUS_BOX_H 46
-static uint16_t *status_box_buf = NULL;
+#define CHAR_16_BUF_SIZE (16 * 16)
+static uint16_t *char_16_buf = NULL;
 
 #define CLEAR_CHUNK_H 20
 static uint16_t *clear_buf = NULL;
@@ -183,74 +183,55 @@ static const uint8_t font_8x16[95][16] = {
     {0x00,0x76,0xDC,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}  // 126 '~'
 };
 
-// Render character into in-memory pixel buffer
-static void render_char_to_buf(uint16_t *buf, int buf_w, int buf_h, int x, int y, char c, uint16_t fg, uint16_t bg, int scale)
-{
-    if (c < 32 || c > 126) c = ' ';
-    const uint8_t *glyph = font_8x16[c - 32];
-    uint16_t fg_s = SWAP_COLOR(fg);
-    uint16_t bg_s = SWAP_COLOR(bg);
-
-    for (int row = 0; row < 16; row++) {
-        uint8_t line = glyph[row];
-        for (int sy = 0; sy < scale; sy++) {
-            int py = y + row * scale + sy;
-            if (py >= buf_h) break;
-            for (int col = 0; col < 8; col++) {
-                uint16_t color = (line & (0x80 >> col)) ? fg_s : bg_s;
-                for (int sx = 0; sx < scale; sx++) {
-                    int px = x + col * scale + sx;
-                    if (px >= buf_w) break;
-                    buf[py * buf_w + px] = color;
-                }
-            }
-        }
-    }
-}
-
-// Render string into in-memory pixel buffer
 static void render_str_to_buf(uint16_t *buf, int buf_w, int buf_h, int x, int y, const char *str, uint16_t fg, uint16_t bg, int scale)
 {
     if (!str) return;
     int cur_x = x;
     int cur_y = y;
+    uint16_t fg_s = SWAP_COLOR(fg);
+    uint16_t bg_s = SWAP_COLOR(bg);
+
     while (*str) {
         if (*str == '\n') {
             cur_x = x;
             cur_y += 16 * scale + 2;
         } else {
-            render_char_to_buf(buf, buf_w, buf_h, cur_x, cur_y, *str, fg, bg, scale);
+            char c = *str;
+            if (c < 32 || c > 126) c = ' ';
+            const uint8_t *glyph = font_8x16[c - 32];
+            for (int row = 0; row < 16; row++) {
+                uint8_t line = glyph[row];
+                for (int sy = 0; sy < scale; sy++) {
+                    int py = cur_y + row * scale + sy;
+                    if (py >= buf_h) break;
+                    for (int col = 0; col < 8; col++) {
+                        uint16_t color = (line & (0x80 >> col)) ? fg_s : bg_s;
+                        for (int sx = 0; sx < scale; sx++) {
+                            int px = cur_x + col * scale + sx;
+                            if (px >= buf_w) break;
+                            buf[py * buf_w + px] = color;
+                        }
+                    }
+                }
+            }
             cur_x += 8 * scale;
         }
         str++;
     }
 }
 
-// Draw pre-rendered llama bitmap
-static uint16_t llama_rendered_buf[128 * 64];
-static void draw_llama_graphic(int offset_x, int offset_y, uint16_t fg, uint16_t bg)
-{
-    if (!display_ready) return;
-    uint16_t fg_s = SWAP_COLOR(fg);
-    uint16_t bg_s = SWAP_COLOR(bg);
-
-    for (int y = 0; y < 64; y++) {
-        for (int x = 0; x < 128; x++) {
-            int byte_idx = y * 16 + (x / 8);
-            uint8_t b = llama_bmp[byte_idx];
-            bool pixel = (b & (1 << (x % 8))) != 0;
-            llama_rendered_buf[y * 128 + x] = pixel ? fg_s : bg_s;
-        }
-    }
-    esp_lcd_panel_draw_bitmap(panel_handle, offset_x, offset_y, offset_x + 128, offset_y + 64, llama_rendered_buf);
-}
+// Global poem layout state
+static int poem_line_idx = 0;
+static int poem_char_idx = 0;
+#define POEM_CARD_X 16
+#define POEM_CARD_Y 36
+#define POEM_CARD_W 288
+#define POEM_CARD_H 148
 
 bool display_driver_init(void)
 {
-    ESP_LOGI(TAG, "Initializing ST7789 SPI LCD (MOSI=%d, CLK=%d, CS=%d, DC=%d, BL=%d)...",
-             CONFIG_LCD_SPI_MOSI, CONFIG_LCD_SPI_CLK, CONFIG_LCD_SPI_CS, CONFIG_LCD_DC, CONFIG_LCD_BL);
+    ESP_LOGI(TAG, "Initializing ST7789 SPI LCD for Chinese Poetry LLM...");
 
-    // 1. Backlight GPIO configuration
     if (CONFIG_LCD_BL >= 0) {
         gpio_config_t bk_gpio_config = {
             .mode = GPIO_MODE_OUTPUT,
@@ -260,28 +241,19 @@ bool display_driver_init(void)
         gpio_set_level(CONFIG_LCD_BL, 1);
     }
 
-    // 2. Allocate persistent DMA-safe frame buffers
     stats_card_buf = (uint16_t *)heap_caps_malloc(STATS_W * STATS_H * sizeof(uint16_t), MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-    if (!stats_card_buf) {
-        stats_card_buf = (uint16_t *)malloc(STATS_W * STATS_H * sizeof(uint16_t));
-    }
-    header_bar_buf = (uint16_t *)heap_caps_malloc(HEADER_W * HEADER_H * sizeof(uint16_t), MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-    if (!header_bar_buf) {
-        header_bar_buf = (uint16_t *)malloc(HEADER_W * HEADER_H * sizeof(uint16_t));
-    }
-    status_box_buf = (uint16_t *)heap_caps_malloc(STATUS_BOX_W * STATUS_BOX_H * sizeof(uint16_t), MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-    if (!status_box_buf) {
-        status_box_buf = (uint16_t *)malloc(STATUS_BOX_W * STATUS_BOX_H * sizeof(uint16_t));
-    }
-    clear_buf = (uint16_t *)heap_caps_malloc(LCD_WIDTH_RES * CLEAR_CHUNK_H * sizeof(uint16_t), MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-    if (!clear_buf) {
-        clear_buf = (uint16_t *)malloc(LCD_WIDTH_RES * CLEAR_CHUNK_H * sizeof(uint16_t));
-    }
-    if (clear_buf) {
-        memset(clear_buf, 0, LCD_WIDTH_RES * CLEAR_CHUNK_H * sizeof(uint16_t));
-    }
+    if (!stats_card_buf) stats_card_buf = (uint16_t *)malloc(STATS_W * STATS_H * sizeof(uint16_t));
 
-    // 3. SPI bus initialization
+    header_bar_buf = (uint16_t *)heap_caps_malloc(HEADER_W * HEADER_H * sizeof(uint16_t), MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    if (!header_bar_buf) header_bar_buf = (uint16_t *)malloc(HEADER_W * HEADER_H * sizeof(uint16_t));
+
+    char_16_buf = (uint16_t *)heap_caps_malloc(CHAR_16_BUF_SIZE * sizeof(uint16_t), MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    if (!char_16_buf) char_16_buf = (uint16_t *)malloc(CHAR_16_BUF_SIZE * sizeof(uint16_t));
+
+    clear_buf = (uint16_t *)heap_caps_malloc(LCD_WIDTH_RES * CLEAR_CHUNK_H * sizeof(uint16_t), MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    if (!clear_buf) clear_buf = (uint16_t *)malloc(LCD_WIDTH_RES * CLEAR_CHUNK_H * sizeof(uint16_t));
+    if (clear_buf) memset(clear_buf, 0, LCD_WIDTH_RES * CLEAR_CHUNK_H * sizeof(uint16_t));
+
     spi_bus_config_t buscfg = {
         .sclk_io_num = CONFIG_LCD_SPI_CLK,
         .mosi_io_num = CONFIG_LCD_SPI_MOSI,
@@ -291,12 +263,8 @@ bool display_driver_init(void)
         .max_transfer_sz = STATS_W * STATS_H * sizeof(uint16_t),
     };
     esp_err_t ret = spi_bus_initialize(LCD_HOST, &buscfg, SPI_DMA_CH_AUTO);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize SPI bus: %s", esp_err_to_name(ret));
-        return false;
-    }
+    if (ret != ESP_OK) return false;
 
-    // 4. Panel IO initialization
     esp_lcd_panel_io_handle_t io_handle = NULL;
     esp_lcd_panel_io_spi_config_t io_config = {
         .dc_gpio_num = CONFIG_LCD_DC,
@@ -308,22 +276,15 @@ bool display_driver_init(void)
         .trans_queue_depth = 10,
     };
     ret = esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_HOST, &io_config, &io_handle);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to create panel IO handle: %s", esp_err_to_name(ret));
-        return false;
-    }
+    if (ret != ESP_OK) return false;
 
-    // 5. Panel ST7789 driver initialization
     esp_lcd_panel_dev_config_t panel_config = {
         .reset_gpio_num = -1,
         .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB,
         .bits_per_pixel = 16,
     };
     ret = esp_lcd_new_panel_st7789(io_handle, &panel_config, &panel_handle);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to create ST7789 panel handle: %s", esp_err_to_name(ret));
-        return false;
-    }
+    if (ret != ESP_OK) return false;
 
     esp_lcd_panel_reset(panel_handle);
     esp_lcd_panel_init(panel_handle);
@@ -335,7 +296,7 @@ bool display_driver_init(void)
 
     display_ready = true;
     display_driver_clear();
-    ESP_LOGI(TAG, "ST7789 LCD initialized successfully (%dx%d)", LCD_WIDTH_RES, LCD_HEIGHT_RES);
+    ESP_LOGI(TAG, "ST7789 LCD initialized for Chinese Poetry LLM (%dx%d)", LCD_WIDTH_RES, LCD_HEIGHT_RES);
     return true;
 }
 
@@ -354,66 +315,115 @@ void display_driver_write_text(const char *text)
     if (!display_ready || !text) return;
     display_driver_clear();
 
-    // 1. Header Bar
     if (header_bar_buf) {
         uint16_t navy_s = SWAP_COLOR(COLOR_NAVY);
         for (int i = 0; i < HEADER_W * HEADER_H; i++) header_bar_buf[i] = navy_s;
-        render_str_to_buf(header_bar_buf, HEADER_W, HEADER_H, 20, 7, "ESP32-S3 LLM Inference", COLOR_WHITE, COLOR_NAVY, 1);
+        render_str_to_buf(header_bar_buf, HEADER_W, HEADER_H, 20, 7, "ESP32-S3 Chinese LLM", COLOR_WHITE, COLOR_NAVY, 1);
         esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, HEADER_W, HEADER_H, header_bar_buf);
     }
 
-    // 2. Status Box
     if (stats_card_buf) {
         uint16_t dark_s = SWAP_COLOR(COLOR_DARK_GRAY);
         for (int i = 0; i < STATS_W * STATS_H; i++) stats_card_buf[i] = dark_s;
-        render_str_to_buf(stats_card_buf, STATS_W, STATS_H, 20, 10, text, COLOR_GOLD, COLOR_DARK_GRAY, 2);
+        render_str_to_buf(stats_card_buf, STATS_W, STATS_H, 20, 12, text, COLOR_GOLD, COLOR_DARK_GRAY, 2);
         esp_lcd_panel_draw_bitmap(panel_handle, 20, 90, 20 + STATS_W, 90 + STATS_H, stats_card_buf);
     }
 }
 
 void display_driver_draw_logo(void)
 {
-    if (!display_ready) return;
-    display_driver_clear();
-
-    // 1. Header Bar
-    if (header_bar_buf) {
-        uint16_t navy_s = SWAP_COLOR(COLOR_NAVY);
-        for (int i = 0; i < HEADER_W * HEADER_H; i++) header_bar_buf[i] = navy_s;
-        render_str_to_buf(header_bar_buf, HEADER_W, HEADER_H, 20, 7, "Llama-2 On ESP32-S3", COLOR_CYAN, COLOR_NAVY, 1);
-        esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, HEADER_W, HEADER_H, header_bar_buf);
-    }
-
-    // 2. Centered Llama Graphic
-    int center_x = (LCD_WIDTH_RES - 128) / 2;
-    draw_llama_graphic(center_x, 34, COLOR_GOLD, COLOR_BLACK);
-
-    // 3. Status text card
-    if (status_box_buf) {
-        memset(status_box_buf, 0, STATUS_BOX_W * STATUS_BOX_H * sizeof(uint16_t));
-        render_str_to_buf(status_box_buf, STATUS_BOX_W, STATUS_BOX_H, 10, 4, "Status: Generating text...", COLOR_WHITE, COLOR_BLACK, 1);
-        render_str_to_buf(status_box_buf, STATUS_BOX_W, STATUS_BOX_H, 10, 24, "Model : stories260K", COLOR_ORANGE, COLOR_BLACK, 1);
-        esp_lcd_panel_draw_bitmap(panel_handle, 20, 104, 20 + STATUS_BOX_W, 104 + STATUS_BOX_H, status_box_buf);
-    }
+    display_driver_start_poem();
 }
 
 void display_driver_show_stats(float tk_s)
 {
-    if (!display_ready || !stats_card_buf) return;
+    display_driver_show_poem_complete(tk_s);
+}
 
-    // Fill entire stats card with navy background
-    uint16_t navy_s = SWAP_COLOR(COLOR_NAVY);
-    for (int i = 0; i < STATS_W * STATS_H; i++) {
-        stats_card_buf[i] = navy_s;
+void display_driver_start_poem(void)
+{
+    if (!display_ready) return;
+    display_driver_clear();
+    poem_line_idx = 0;
+    poem_char_idx = 0;
+
+    // 1. Classical Blue Header
+    if (header_bar_buf) {
+        uint16_t navy_s = SWAP_COLOR(COLOR_NAVY);
+        for (int i = 0; i < HEADER_W * HEADER_H; i++) header_bar_buf[i] = navy_s;
+        render_str_to_buf(header_bar_buf, HEADER_W, HEADER_H, 15, 7, "Chinese Classical Poetry LLM", COLOR_CYAN, COLOR_NAVY, 1);
+        esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, HEADER_W, HEADER_H, header_bar_buf);
     }
 
-    // Render "Speed: XX.XX tok/s" in 2x scaled crisp green font inside buffer
+    // 2. Clear poem card area
+    uint16_t bg_s = SWAP_COLOR(COLOR_BG_DARK);
+    uint16_t *card_bg_buf = (uint16_t *)malloc(POEM_CARD_W * 20 * sizeof(uint16_t));
+    if (card_bg_buf) {
+        for (int i = 0; i < POEM_CARD_W * 20; i++) card_bg_buf[i] = bg_s;
+        for (int y = POEM_CARD_Y; y < POEM_CARD_Y + POEM_CARD_H; y += 20) {
+            int h = 20;
+            if (y + h > POEM_CARD_Y + POEM_CARD_H) h = POEM_CARD_Y + POEM_CARD_H - y;
+            esp_lcd_panel_draw_bitmap(panel_handle, POEM_CARD_X, y, POEM_CARD_X + POEM_CARD_W, y + h, card_bg_buf);
+        }
+        free(card_bg_buf);
+    }
+}
+
+void display_driver_append_token(int token_id)
+{
+    if (!display_ready || !char_16_buf) return;
+    if (token_id < 0 || token_id >= ZH_FONT_COUNT) return;
+
+    // Special token 3 is newline
+    if (token_id == 3) {
+        poem_line_idx++;
+        poem_char_idx = 0;
+        return;
+    }
+    // Skip unk / bos / eos tokens from rendering
+    if (token_id < 4) return;
+
+    // Auto line break if line exceeds 14 chars
+    if (poem_char_idx >= 14) {
+        poem_line_idx++;
+        poem_char_idx = 0;
+    }
+    if (poem_line_idx >= 5) return; // card holds up to 5 lines
+
+    // Render 16x16 Chinese character
+    const uint8_t *glyph = zh_font_16x16[token_id];
+    uint16_t fg_s = SWAP_COLOR(COLOR_GOLD);
+    uint16_t bg_s = SWAP_COLOR(COLOR_BG_DARK);
+
+    for (int y = 0; y < 16; y++) {
+        uint8_t hi = glyph[y * 2];
+        uint8_t lo = glyph[y * 2 + 1];
+        for (int x = 0; x < 8; x++) {
+            char_16_buf[y * 16 + x] = (hi & (1 << (7 - x))) ? fg_s : bg_s;
+        }
+        for (int x = 0; x < 8; x++) {
+            char_16_buf[y * 16 + 8 + x] = (lo & (1 << (7 - x))) ? fg_s : bg_s;
+        }
+    }
+
+    int px = POEM_CARD_X + 16 + poem_char_idx * 18;
+    int py = POEM_CARD_Y + 12 + poem_line_idx * 26;
+    esp_lcd_panel_draw_bitmap(panel_handle, px, py, px + 16, py + 16, char_16_buf);
+    poem_char_idx++;
+}
+
+void display_driver_show_poem_complete(float tk_s)
+{
+    if (!display_ready || !stats_card_buf) return;
+
+    uint16_t navy_s = SWAP_COLOR(COLOR_NAVY);
+    for (int i = 0; i < STATS_W * STATS_H; i++) stats_card_buf[i] = navy_s;
+
     char stat_str[40];
     snprintf(stat_str, sizeof(stat_str), "Speed: %.2f tok/s", tk_s);
-    render_str_to_buf(stats_card_buf, STATS_W, STATS_H, 20, 10, stat_str, COLOR_GREEN, COLOR_NAVY, 2);
+    render_str_to_buf(stats_card_buf, STATS_W, STATS_H, 20, 12, stat_str, COLOR_GREEN, COLOR_NAVY, 2);
 
-    // Send the complete frame to display in a single atomic DMA transmission
-    esp_lcd_panel_draw_bitmap(panel_handle, 20, 160, 20 + STATS_W, 160 + STATS_H, stats_card_buf);
+    esp_lcd_panel_draw_bitmap(panel_handle, 20, 192, 20 + STATS_W, 192 + STATS_H, stats_card_buf);
 }
 
 #elif defined(CONFIG_BOARD_MODEL_SSD1306_I2C)
@@ -427,7 +437,6 @@ static bool display_ready = false;
 
 bool display_driver_init(void)
 {
-    ESP_LOGI(TAG, "Initializing SSD1306 OLED via I2C...");
     u8g2_esp32_hal_t u8g2_esp32_hal = U8G2_ESP32_HAL_DEFAULT;
     u8g2_esp32_hal.sda = CONFIG_I2C_MASTER_SDA;
     u8g2_esp32_hal.scl = CONFIG_I2C_MASTER_SCL;
@@ -481,17 +490,19 @@ void display_driver_show_stats(float tk_s)
     display_driver_write_text(buffer);
 }
 
+void display_driver_start_poem(void) {}
+void display_driver_append_token(int token_id) {}
+void display_driver_show_poem_complete(float tk_s) { display_driver_show_stats(tk_s); }
+
 #else // Headless Mode
 
-bool display_driver_init(void)
-{
-    ESP_LOGI(TAG, "Running in Headless mode (serial output only).");
-    return true;
-}
-
+bool display_driver_init(void) { return true; }
 void display_driver_clear(void) {}
 void display_driver_write_text(const char *text) {}
 void display_driver_draw_logo(void) {}
 void display_driver_show_stats(float tk_s) {}
+void display_driver_start_poem(void) {}
+void display_driver_append_token(int token_id) {}
+void display_driver_show_poem_complete(float tk_s) {}
 
 #endif

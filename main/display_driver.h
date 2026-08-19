@@ -10,7 +10,6 @@ extern "C" {
 
 /**
  * @brief Initializes the display hardware according to the active board configuration.
- *        If display initialization fails, it logs an error and returns false without crashing.
  * 
  * @return true if initialized successfully, false otherwise.
  */
@@ -39,6 +38,25 @@ void display_driver_show_stats(float tk_s);
  * @brief Clears the screen.
  */
 void display_driver_clear(void);
+
+/**
+ * @brief Prepares the screen UI for Chinese poetry generation.
+ */
+void display_driver_start_poem(void);
+
+/**
+ * @brief Appends a single Chinese character token to the on-screen poem layout.
+ * 
+ * @param token_id The token ID in vocabulary.
+ */
+void display_driver_append_token(int token_id);
+
+/**
+ * @brief Displays the final inference statistics card below the poem.
+ * 
+ * @param tk_s Tokens per second.
+ */
+void display_driver_show_poem_complete(float tk_s);
 
 #ifdef __cplusplus
 }

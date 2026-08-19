@@ -7,6 +7,7 @@
  */
 
 #include "llm.h"
+#include "display_driver.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <ctype.h>
@@ -671,23 +672,9 @@ char *decode(Tokenizer *t, int prev_token, int token)
 
 void safe_printf(char *piece)
 {
-    // piece might be a raw byte token, and we only want to print printable chars or whitespace
-    // because some of the other bytes can be various control codes, backspace, etc.
-    if (piece == NULL)
+    if (piece == NULL || piece[0] == '\0')
     {
         return;
-    }
-    if (piece[0] == '\0')
-    {
-        return;
-    }
-    if (piece[1] == '\0')
-    {
-        unsigned char byte_val = piece[0];
-        if (!(isprint(byte_val) || isspace(byte_val)))
-        {
-            return; // bad byte, don't print it
-        }
     }
     printf("%s", piece);
 }
@@ -1059,15 +1046,16 @@ void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, 
         }
         pos++;
 
-        // data-dependent terminating condition: the BOS (=1) token delimits sequences
-        if (next == 1)
+        // data-dependent terminating condition: BOS (=1) or EOS (=2)
+        if (next == 1 || next == 2)
         {
             break;
         }
 
         // print the token as string, decode it with the Tokenizer object
         char *piece = decode(tokenizer, token, next);
-        safe_printf(piece); // same as printf("%s", piece), but skips "unsafe" bytes
+        safe_printf(piece);
+        display_driver_append_token(next);
         fflush(stdout);
         token = next;
 

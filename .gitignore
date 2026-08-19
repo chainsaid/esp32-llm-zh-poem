@@ -1,3 +1,9 @@
 build/
-.vscode
+.vscode/
 managed_components/
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pth
+*.pt

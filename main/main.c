@@ -8,6 +8,9 @@
 #include "esp_log.h"
 #include "llm.h"
 #include "display_driver.h"
+#include "esp_random.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "MAIN";
 
@@ -16,7 +19,7 @@ static const char *TAG = "MAIN";
  */
 void init_storage(void)
 {
-    ESP_LOGI(TAG, "Initializing SPIFFS");
+    ESP_LOGI(TAG, "Initializing SPIFFS...");
 
     esp_vfs_spiffs_conf_t conf = {
         .base_path = "/data",
@@ -62,40 +65,39 @@ void init_storage(void)
  */
 void generate_complete_cb(float tk_s)
 {
-    ESP_LOGI(TAG, "Inference finished, speed: %.2f tok/s", tk_s);
-    display_driver_show_stats(tk_s);
+    ESP_LOGI(TAG, "Chinese Poetry Inference finished! Speed: %.2f tok/s", tk_s);
+    display_driver_show_poem_complete(tk_s);
 }
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "Starting ESP32-S3 LLM App...");
+    ESP_LOGI(TAG, "Starting ESP32-S3 Chinese Poetry LLM App...");
 
     // Initialize display hardware abstraction layer
     display_driver_init();
-    display_driver_write_text("Loading Model...");
+    display_driver_write_text("Loading Poem LLM...");
 
     // Mount SPIFFS filesystem
     init_storage();
 
-    // Default LLM parameters
-    char *checkpoint_path = "/data/stories260K.bin"; // e.g. out/model.bin
-    char *tokenizer_path = "/data/tok512.bin";
-    float temperature = 1.0f;        // 0.0 = greedy deterministic. 1.0 = original. don't set higher
-    float topp = 0.9f;               // top-p in nucleus sampling. 1.0 = off. 0.9 works well, but slower
-    int steps = 256;                 // number of steps to run for
-    char *prompt = NULL;             // prompt string
-    unsigned long long rng_seed = 0; // seed rng with time by default
+    // Chinese Poetry Model parameters
+    char *checkpoint_path = "/data/poem_model.bin";
+    char *tokenizer_path = "/data/poem_tok.bin";
+    float temperature = 0.8f;        // 0.8 = optimal creativity for poetry
+    float topp = 0.9f;               // top-p nucleus sampling
+    int steps = 64;                  // steps to generate full quatrain / poem
+    char *prompt = "床前明月光";       // Prompt first line for poetry continuation
+    unsigned long long rng_seed = 0; // seed rng with time
 
-    // Parameter validation/overrides
     if (rng_seed <= 0)
         rng_seed = (unsigned int)time(NULL);
 
     // Build the Transformer via the model .bin file
     Transformer transformer;
-    ESP_LOGI(TAG, "LLM Path is %s", checkpoint_path);
+    ESP_LOGI(TAG, "Loading Chinese Poetry LLM checkpoint from %s", checkpoint_path);
     build_transformer(&transformer, checkpoint_path);
     if (steps == 0 || steps > transformer.config.seq_len)
-        steps = transformer.config.seq_len; // override to ~max length
+        steps = transformer.config.seq_len;
 
     // Build the Tokenizer via the tokenizer .bin file
     Tokenizer tokenizer;
@@ -105,7 +107,42 @@ void app_main(void)
     Sampler sampler;
     build_sampler(&sampler, transformer.config.vocab_size, temperature, topp, rng_seed);
 
-    // Run inference!
-    display_driver_draw_logo();
-    generate(&transformer, &tokenizer, &sampler, prompt, steps, &generate_complete_cb);
+    // Built-in classical prompts for continuous poetry generation
+    const char *prompts[] = {
+        "床前明月光，",
+        "白日依山尽，",
+        "春眠不觉晓，",
+        "千山鸟飞绝，",
+        "红豆生南国，",
+        "独坐幽篁里，",
+        "空山不见人，",
+        "日照香炉生紫烟，",
+        "朝辞白帝彩云间，",
+        "月黑雁飞高，",
+        NULL // free generation without prompt
+    };
+    int num_prompts = sizeof(prompts) / sizeof(prompts[0]);
+    int poem_counter = 0;
+
+    while (1)
+    {
+        const char *cur_prompt = prompts[poem_counter % num_prompts];
+        poem_counter++;
+
+        // Update random seed for novel poem generation each time
+        sampler.rng_state = (unsigned int)time(NULL) + (unsigned int)esp_random();
+
+        // Prepare classical poetry display layout
+        display_driver_start_poem();
+
+        // Run inference!
+        ESP_LOGI(TAG, ">>> [Poem #%d] Generating Chinese Poem (Prompt: %s) <<<", 
+                 poem_counter, cur_prompt ? cur_prompt : "(Free Composition)");
+        printf("\n================ [ 诗词创作 第 %d 首 ] ================\n", poem_counter);
+        generate(&transformer, &tokenizer, &sampler, (char *)cur_prompt, steps, &generate_complete_cb);
+        printf("=========================================================\n\n");
+
+        // Pause for 5 seconds to let the user read before next poem
+        vTaskDelay(pdMS_TO_TICKS(5000));
+    }
 }
