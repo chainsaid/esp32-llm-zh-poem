@@ -16,7 +16,7 @@
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
 
-typedef float v4sf __attribute__((aligned(16)));
+typedef float v4sf;
 
 typedef struct {
     float prob;

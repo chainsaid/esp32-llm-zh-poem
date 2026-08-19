@@ -1,5 +1,6 @@
-idf_component_register(SRCS "main.c" "llm.c"
-                    INCLUDE_DIRS ""  LDFRAGMENTS "../linker.lf")
+idf_component_register(SRCS "main.c" "llm.c" "display_driver.c"
+                    INCLUDE_DIRS "."  LDFRAGMENTS "../linker.lf"
+                    REQUIRES esp_lcd driver esp_timer spiffs esp_hw_support)
 
 
 
