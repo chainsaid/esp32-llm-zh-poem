@@ -14,7 +14,7 @@ class ModelArgs:
     n_layers: int = 5
     n_heads: int = 6
     n_kv_heads: int = 6
-    vocab_size: int = 1024
+    vocab_size: int = 2048  # keep in sync with build_zh_tokenizer.VOCAB_SIZE
     hidden_dim: int = 256
     seq_len: int = 128
     norm_eps: float = 1e-5
@@ -135,6 +135,6 @@ class Transformer(nn.Module):
         
         loss = None
         if targets is not None:
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-1)
             
         return logits, loss

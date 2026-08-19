@@ -721,15 +721,12 @@ void encode(Tokenizer *t, char *text, int8_t bos, int8_t eos, int *tokens, int *
     if (bos)
         tokens[(*n_tokens)++] = 1;
 
-    // add_dummy_prefix is true by default
-    // so prepend a dummy prefix token to the input string, but only if text != ""
-    // TODO: pretty sure this isn't correct in the general case but I don't have the
-    // energy to read more of the sentencepiece code to figure out what it's doing
-    if (text[0] != '\0')
-    {
-        int dummy_prefix = str_lookup(" ", t->sorted_vocab, t->vocab_size);
-        tokens[(*n_tokens)++] = dummy_prefix;
-    }
+    // NOTE: llama2.c's upstream SentencePiece-derived dummy leading-space
+    // prefix is intentionally NOT inserted here. This tokenizer/model is
+    // trained on Chinese poetry samples that never start with a space (the
+    // space token only ever appears mid-string as a "主题：X 体裁：Y" field
+    // separator), so prepending one would start every generation from a
+    // context the model never saw during training.
 
     // Okay UTF-8 time. This will get messy. Here is the reference from Wikipedia:
     // Code point ↔ UTF-8 conversion

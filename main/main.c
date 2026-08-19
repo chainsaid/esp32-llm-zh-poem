@@ -85,8 +85,7 @@ void app_main(void)
     char *tokenizer_path = "/data/poem_tok.bin";
     float temperature = 0.8f;        // 0.8 = optimal creativity for poetry
     float topp = 0.9f;               // top-p nucleus sampling
-    int steps = 64;                  // steps to generate full quatrain / poem
-    char *prompt = "床前明月光";       // Prompt first line for poetry continuation
+    int steps = 110;                 // budget covers prompt + up to a full 七律 (~78 tokens)
     unsigned long long rng_seed = 0; // seed rng with time
 
     if (rng_seed <= 0)
@@ -107,18 +106,21 @@ void app_main(void)
     Sampler sampler;
     build_sampler(&sampler, transformer.config.vocab_size, temperature, topp, rng_seed);
 
-    // Built-in classical prompts for continuous poetry generation
+    // Built-in theme+meter conditioning prompts, matching the
+    // "主题：{关键词} 体裁：{五绝/七绝/五律/七律/五言/七言}\n" training format
+    // (see tools/dataset.py). A bare first-line prompt like the upstream
+    // llama2.c demo used is out-of-distribution for this model.
     const char *prompts[] = {
-        "床前明月光，",
-        "白日依山尽，",
-        "春眠不觉晓，",
-        "千山鸟飞绝，",
-        "红豆生南国，",
-        "独坐幽篁里，",
-        "空山不见人，",
-        "日照香炉生紫烟，",
-        "朝辞白帝彩云间，",
-        "月黑雁飞高，",
+        "主题：明月 体裁：五绝\n",
+        "主题：春风 体裁：七绝\n",
+        "主题：边塞 体裁：七律\n",
+        "主题：相思 体裁：五律\n",
+        "主题：孤舟 体裁：五绝\n",
+        "主题：江南 体裁：七绝\n",
+        "主题：山水 体裁：五言\n",
+        "主题：夕阳 体裁：七言\n",
+        "体裁：五绝\n",
+        "主题：故乡\n",
         NULL // free generation without prompt
     };
     int num_prompts = sizeof(prompts) / sizeof(prompts[0]);

@@ -2,3 +2,7 @@
 archive: libmain.a
 entries:
     * (noflash)     # places all data under IRAM/DRAM
+    # ...except the glyph atlas: 2048 x 32B = 64KB of read-only bitmap that
+    # would otherwise eat DRAM the model and KV cache need. It is touched
+    # once per rendered character, so serving it from cached flash is free.
+    zh_font_16x16 (default)

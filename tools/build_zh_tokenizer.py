@@ -10,7 +10,7 @@ import json
 from collections import Counter
 from dataset import get_training_text_samples
 
-VOCAB_SIZE = 1024  # Highly optimized for ESP32-S3
+VOCAB_SIZE = 2048  # Balances ESP32-S3 memory budget against corpus char coverage (~96%)
 
 def build_tokenizer(output_bin="data/poem_tok.bin", output_json="tools/vocab.json", vocab_size=VOCAB_SIZE):
     # Special tokens
