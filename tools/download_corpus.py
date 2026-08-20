@@ -10,7 +10,52 @@ import urllib.request
 import re
 import zhconv
 
-CORPUS_OUTPUT = "tools/poetry_corpus.json"
+TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
+CORPUS_OUTPUT = os.path.join(TOOLS_DIR, "poetry_corpus.json")
+
+# Source-level content filter: a poem whose title/content contains one of
+# these terms is dropped entirely before it ever reaches dataset.py, so the
+# model has zero training signal for it (as opposed to filtering generated
+# output after the fact, which only catches what a blocklist happens to
+# enumerate). Deliberately narrow to whole modern-specific names/events, not
+# ordinary classical imperial vocabulary (天子/皇帝/龙/朝廷/君臣...) -- those
+# are normal Tang-poetry register describing ancient emperors and appear
+# hundreds of times per corpus scan; blacklisting them would gut the corpus
+# for a false-positive concern. This list is a manually curated starting
+# point, not sourced from any official registry -- extend it as needed.
+SENSITIVE_TERMS = [
+    # Modern political figures (full names only, to avoid matching common
+    # single surname/given-name characters that are everyday vocabulary)
+    "毛泽东", "邓小平", "江泽民", "胡锦涛", "习近平",
+    "李克强", "温家宝", "周恩来", "李鹏",
+    # Modern political events / movements. Full names only -- short 2-char
+    # forms (港独/藏独/疆独) were tried and dropped: "独" is common enough in
+    # classical Chinese (独倚/独坐/独酌/独立...) that they false-positived on
+    # real Tang poems, e.g. 杜甫《江上》's "行藏独倚楼" (a classical idiom
+    # meaning "whether to serve office or retire" + "alone") matched "藏独".
+    "六四事件", "天安门事件", "法轮功", "反送中", "颜色革命", "和平演变",
+    "新疆独立", "西藏独立", "台湾独立",
+]
+
+def contains_sensitive_term(*texts):
+    """Returns the first matching term found in any of the given strings, or None."""
+    for text in texts:
+        for term in SENSITIVE_TERMS:
+            if term in text:
+                return term
+    return None
+
+def filter_sensitive_poems(poems):
+    """Drops any poem whose title/author/content matches SENSITIVE_TERMS.
+    Returns (kept, removed) where removed is a list of (poem, matched_term)."""
+    kept, removed = [], []
+    for p in poems:
+        hit = contains_sensitive_term(p.get("title", ""), p.get("author", ""), p.get("content", ""))
+        if hit:
+            removed.append((p, hit))
+        else:
+            kept.append(p)
+    return kept, removed
 
 def download_tang_poetry(max_volumes=15):
     """
@@ -59,11 +104,18 @@ def download_tang_poetry(max_volumes=15):
             print(f"  Warning: Failed to download {url}: {e}")
             
     print(f"Total clean Chinese poems collected: {len(all_poems)}")
-    
+
+    all_poems, removed = filter_sensitive_poems(all_poems)
+    if removed:
+        print(f"Filtered out {len(removed)} poem(s) matching SENSITIVE_TERMS:")
+        for p, term in removed:
+            print(f"  [{term}] {p.get('title', '(untitled)')} -- {p.get('author', '')}")
+    print(f"Total poems after sensitive-term filtering: {len(all_poems)}")
+
     os.makedirs(os.path.dirname(CORPUS_OUTPUT), exist_ok=True)
     with open(CORPUS_OUTPUT, "w", encoding="utf-8") as f:
         json.dump(all_poems, f, ensure_ascii=False, indent=2)
-        
+
     print(f"Successfully saved poetry dataset to {CORPUS_OUTPUT}")
     return all_poems
 
