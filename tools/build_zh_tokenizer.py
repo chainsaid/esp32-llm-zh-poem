@@ -8,6 +8,7 @@ import os
 import struct
 import json
 from collections import Counter
+from dataset import get_training_text_samples
 TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(TOOLS_DIR)
 VOCAB_SIZE = 2048  # Balances ESP32-S3 memory budget against corpus char coverage (~96%)
