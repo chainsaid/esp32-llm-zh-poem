@@ -938,9 +938,9 @@ CONFIG_LCD_RST=0
 # default:
 CONFIG_LCD_BL=1
 # default:
-CONFIG_LCD_WIDTH=320
+CONFIG_LCD_WIDTH=240
 # default:
-CONFIG_LCD_HEIGHT=240
+CONFIG_LCD_HEIGHT=320
 # end of Waveshare ST7789 LCD Pins
 # end of Board Hardware & Display Configuration
 

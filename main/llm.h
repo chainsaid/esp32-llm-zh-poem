@@ -10,6 +10,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -106,12 +107,26 @@ typedef struct {
 
 
 
-typedef void (*generated_complete_cb)(float tokens_ps);
-
 void build_transformer(Transformer *t, char* checkpoint_path);
 void build_tokenizer(Tokenizer* t, char* tokenizer_path, int vocab_size);
 void build_sampler(Sampler* sampler, int vocab_size, float temperature, float topp, unsigned long long rng_seed);
-void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, char *prompt, int steps, generated_complete_cb cb_done);
+
+// Generates exactly one poem line (see llm.c for the full contract): primes
+// the KV cache with `prompt`, then samples/forces tokens until `meter_chars`
+// content characters are produced, ending the line with '，' (is_couplet_end
+// == 0) or '。' (is_couplet_end != 0). Writes the line's raw UTF-8 text (no
+// header) into out_buf and returns the content token count, or -1 on a
+// prompt encoding failure.
+int generate_poem_line(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
+                        const char *prompt, int meter_chars, int is_couplet_end,
+                        char *out_buf, size_t out_buf_cap);
+
+// Encodes `text` (UTF-8) into `tokens` (upper-bounded by strlen(text)+3 --
+// caller-allocated). Exposed so main.c can turn a short status string (e.g.
+// current 体裁/主题) into token ids for display_driver_show_status(), which
+// looks glyphs up by token id the same way the poem card does.
+void encode(Tokenizer *t, char *text, int8_t bos, int8_t eos, int *tokens, int *n_tokens);
+
 void free_sampler(Sampler* sampler);
 void free_transformer(Transformer* t);
 void free_tokenizer(Tokenizer* t);

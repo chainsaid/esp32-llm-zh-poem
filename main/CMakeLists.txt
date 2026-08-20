@@ -1,6 +1,6 @@
-idf_component_register(SRCS "zh_font_16x16.c" "main.c" "llm.c" "display_driver.c"
+idf_component_register(SRCS "imu_driver.c" "zh_font_16x16.c" "main.c" "llm.c" "display_driver.c"
                     INCLUDE_DIRS "."  LDFRAGMENTS "../linker.lf"
-                    REQUIRES esp_lcd driver esp_timer spiffs esp_hw_support)
+                    REQUIRES esp_lcd driver esp_driver_i2c esp_timer spiffs esp_hw_support)
 
 
 

@@ -42,10 +42,10 @@ static const char *TAG = "display_driver";
 #define CONFIG_LCD_BL          1
 #endif
 #ifndef CONFIG_LCD_WIDTH
-#define CONFIG_LCD_WIDTH       320
+#define CONFIG_LCD_WIDTH       240
 #endif
 #ifndef CONFIG_LCD_HEIGHT
-#define CONFIG_LCD_HEIGHT      240
+#define CONFIG_LCD_HEIGHT      320
 #endif
 
 #define LCD_HOST               SPI2_HOST
@@ -70,11 +70,11 @@ static esp_lcd_panel_handle_t panel_handle = NULL;
 static bool display_ready = false;
 
 // Persistent DMA-safe frame buffers
-#define STATS_W 280
+#define STATS_W 224
 #define STATS_H 42
 static uint16_t *stats_card_buf = NULL;
 
-#define HEADER_W 320
+#define HEADER_W 240
 #define HEADER_H 30
 static uint16_t *header_bar_buf = NULL;
 
@@ -223,10 +223,21 @@ static void render_str_to_buf(uint16_t *buf, int buf_w, int buf_h, int x, int y,
 // Global poem layout state
 static int poem_line_idx = 0;
 static int poem_char_idx = 0;
-#define POEM_CARD_X 16
+// Portrait canvas (240 wide x 320 tall, see swap_xy/mirror in
+// display_driver_init()): header at the top, poem card filling most of the
+// height, status strip (体裁/主题) pinned to the bottom.
+#define POEM_CARD_X 8
 #define POEM_CARD_Y 36
-#define POEM_CARD_W 288
-#define POEM_CARD_H 148
+#define POEM_CARD_W 224
+#define POEM_CARD_H 252   // 36..288, leaving an 8px gap above the status bar
+#define POEM_VISIBLE_LINES 9   // must match (POEM_CARD_H-12)/26 rows
+#define POEM_MAX_CHARS_PER_LINE 13
+
+#define STATUS_BAR_X 8
+#define STATUS_BAR_Y 296
+#define STATUS_BAR_W 224
+#define STATUS_BAR_H 20   // 296..316, leaving a 4px margin above the 320px screen bottom
+#define STATUS_BAR_MAX_GLYPHS 16
 
 bool display_driver_init(void)
 {
@@ -289,8 +300,15 @@ bool display_driver_init(void)
     esp_lcd_panel_reset(panel_handle);
     esp_lcd_panel_init(panel_handle);
     esp_lcd_panel_invert_color(panel_handle, true);
-    esp_lcd_panel_swap_xy(panel_handle, true);
-    esp_lcd_panel_mirror(panel_handle, true, false);
+    // Landscape (previous) was swap_xy=true, mirror(true,false) -- one of
+    // the 4 standard MADCTL rotation states for this swap/mirror group
+    // (0111=(F,F,F), 90=(T,T,F), 180=(F,T,T), 270=(T,F,T)); rotating 90 CCW
+    // from that lands here at 0=(F,F,F), i.e. the panel's native portrait
+    // addressing. If this comes out upside-down instead of CCW, the fix is
+    // swapping to the 180 entry (F,T,T); if it's mirrored, the 270 entry
+    // (T,F,T) -- both one-line changes, not a re-derivation.
+    esp_lcd_panel_swap_xy(panel_handle, false);
+    esp_lcd_panel_mirror(panel_handle, false, false);
     esp_lcd_panel_set_gap(panel_handle, 0, 0);
     esp_lcd_panel_disp_on_off(panel_handle, true);
 
@@ -325,8 +343,8 @@ void display_driver_write_text(const char *text)
     if (stats_card_buf) {
         uint16_t dark_s = SWAP_COLOR(COLOR_DARK_GRAY);
         for (int i = 0; i < STATS_W * STATS_H; i++) stats_card_buf[i] = dark_s;
-        render_str_to_buf(stats_card_buf, STATS_W, STATS_H, 20, 12, text, COLOR_GOLD, COLOR_DARK_GRAY, 2);
-        esp_lcd_panel_draw_bitmap(panel_handle, 20, 90, 20 + STATS_W, 90 + STATS_H, stats_card_buf);
+        render_str_to_buf(stats_card_buf, STATS_W, STATS_H, 8, 12, text, COLOR_GOLD, COLOR_DARK_GRAY, 2);
+        esp_lcd_panel_draw_bitmap(panel_handle, 8, 90, 8 + STATS_W, 90 + STATS_H, stats_card_buf);
     }
 }
 
@@ -340,60 +358,25 @@ void display_driver_show_stats(float tk_s)
     display_driver_show_poem_complete(tk_s);
 }
 
-void display_driver_start_poem(void)
+static void poem_card_clear(void)
 {
-    if (!display_ready) return;
-    display_driver_clear();
-    poem_line_idx = 0;
-    poem_char_idx = 0;
-
-    // 1. Classical Blue Header
-    if (header_bar_buf) {
-        uint16_t navy_s = SWAP_COLOR(COLOR_NAVY);
-        for (int i = 0; i < HEADER_W * HEADER_H; i++) header_bar_buf[i] = navy_s;
-        render_str_to_buf(header_bar_buf, HEADER_W, HEADER_H, 15, 7, "Chinese Classical Poetry LLM", COLOR_CYAN, COLOR_NAVY, 1);
-        esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, HEADER_W, HEADER_H, header_bar_buf);
-    }
-
-    // 2. Clear poem card area
     uint16_t bg_s = SWAP_COLOR(COLOR_BG_DARK);
     uint16_t *card_bg_buf = (uint16_t *)malloc(POEM_CARD_W * 20 * sizeof(uint16_t));
-    if (card_bg_buf) {
-        for (int i = 0; i < POEM_CARD_W * 20; i++) card_bg_buf[i] = bg_s;
-        for (int y = POEM_CARD_Y; y < POEM_CARD_Y + POEM_CARD_H; y += 20) {
-            int h = 20;
-            if (y + h > POEM_CARD_Y + POEM_CARD_H) h = POEM_CARD_Y + POEM_CARD_H - y;
-            esp_lcd_panel_draw_bitmap(panel_handle, POEM_CARD_X, y, POEM_CARD_X + POEM_CARD_W, y + h, card_bg_buf);
-        }
-        free(card_bg_buf);
+    if (!card_bg_buf) return;
+    for (int i = 0; i < POEM_CARD_W * 20; i++) card_bg_buf[i] = bg_s;
+    for (int y = POEM_CARD_Y; y < POEM_CARD_Y + POEM_CARD_H; y += 20) {
+        int h = 20;
+        if (y + h > POEM_CARD_Y + POEM_CARD_H) h = POEM_CARD_Y + POEM_CARD_H - y;
+        esp_lcd_panel_draw_bitmap(panel_handle, POEM_CARD_X, y, POEM_CARD_X + POEM_CARD_W, y + h, card_bg_buf);
     }
+    free(card_bg_buf);
 }
 
-void display_driver_append_token(int token_id)
+// Renders one 16x16 glyph at absolute pixel (px, py), in the given color.
+static void draw_glyph_raw(int px, int py, int token_id, uint16_t fg_s, uint16_t bg_s)
 {
-    if (!display_ready || !char_16_buf) return;
-    if (token_id < 0 || token_id >= ZH_FONT_COUNT) return;
-
-    // Special token 3 is newline
-    if (token_id == 3) {
-        poem_line_idx++;
-        poem_char_idx = 0;
-        return;
-    }
-    // Skip unk / bos / eos tokens from rendering
-    if (token_id < 4) return;
-
-    // Auto line break if line exceeds 14 chars
-    if (poem_char_idx >= 14) {
-        poem_line_idx++;
-        poem_char_idx = 0;
-    }
-    if (poem_line_idx >= 5) return; // card holds up to 5 lines
-
-    // Render 16x16 Chinese character
+    if (!char_16_buf) return;
     const uint8_t *glyph = zh_font_16x16[token_id];
-    uint16_t fg_s = SWAP_COLOR(COLOR_GOLD);
-    uint16_t bg_s = SWAP_COLOR(COLOR_BG_DARK);
 
     for (int y = 0; y < 16; y++) {
         uint8_t hi = glyph[y * 2];
@@ -405,10 +388,69 @@ void display_driver_append_token(int token_id)
             char_16_buf[y * 16 + 8 + x] = (lo & (1 << (7 - x))) ? fg_s : bg_s;
         }
     }
-
-    int px = POEM_CARD_X + 16 + poem_char_idx * 18;
-    int py = POEM_CARD_Y + 12 + poem_line_idx * 26;
     esp_lcd_panel_draw_bitmap(panel_handle, px, py, px + 16, py + 16, char_16_buf);
+}
+
+// Renders one 16x16 glyph at (row, col) in the poem card.
+static void draw_glyph_at(int row, int col, int token_id)
+{
+    int px = POEM_CARD_X + 16 + col * 18;
+    int py = POEM_CARD_Y + 12 + row * 26;
+    draw_glyph_raw(px, py, token_id, SWAP_COLOR(COLOR_GOLD), SWAP_COLOR(COLOR_BG_DARK));
+}
+
+// Wipes just the poem card and resets the write cursor to the top-left,
+// without touching the header. Called from display_driver_append_token()
+// once the card is full, and from display_driver_start_poem() itself.
+static void poem_card_reset(void)
+{
+    poem_card_clear();
+    poem_line_idx = 0;
+    poem_char_idx = 0;
+}
+
+void display_driver_start_poem(void)
+{
+    if (!display_ready) return;
+    display_driver_clear();
+    poem_line_idx = 0;
+    poem_char_idx = 0;
+
+    // 1. Classical Blue Header
+    if (header_bar_buf) {
+        uint16_t navy_s = SWAP_COLOR(COLOR_NAVY);
+        for (int i = 0; i < HEADER_W * HEADER_H; i++) header_bar_buf[i] = navy_s;
+        render_str_to_buf(header_bar_buf, HEADER_W, HEADER_H, 4, 7, "Chinese Classical Poetry LLM", COLOR_CYAN, COLOR_NAVY, 1);
+        esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, HEADER_W, HEADER_H, header_bar_buf);
+    }
+
+    // 2. Clear poem card area
+    poem_card_clear();
+}
+
+void display_driver_append_token(int token_id)
+{
+    if (!display_ready || !char_16_buf) return;
+    if (token_id < 0 || token_id >= ZH_FONT_COUNT) return;
+
+    // Special token 3 is newline
+    if (token_id == 3) {
+        poem_line_idx++;
+        poem_char_idx = 0;
+        if (poem_line_idx >= POEM_VISIBLE_LINES) poem_card_reset();
+        return;
+    }
+    // Skip unk / bos / eos tokens from rendering
+    if (token_id < 4) return;
+
+    // Auto line break if line exceeds the per-row character budget
+    if (poem_char_idx >= POEM_MAX_CHARS_PER_LINE - 2) {
+        poem_line_idx++;
+        poem_char_idx = 0;
+        if (poem_line_idx >= POEM_VISIBLE_LINES) poem_card_reset();
+    }
+
+    draw_glyph_at(poem_line_idx, poem_char_idx, token_id);
     poem_char_idx++;
 }
 
@@ -424,6 +466,58 @@ void display_driver_show_poem_complete(float tk_s)
     render_str_to_buf(stats_card_buf, STATS_W, STATS_H, 20, 12, stat_str, COLOR_GREEN, COLOR_NAVY, 2);
 
     esp_lcd_panel_draw_bitmap(panel_handle, 20, 192, 20 + STATS_W, 192 + STATS_H, stats_card_buf);
+}
+
+void display_driver_show_status(const int *tokens, int count)
+{
+    if (!display_ready || !tokens) return;
+
+    uint16_t bg_s = SWAP_COLOR(COLOR_BG_DARK);
+    uint16_t fg_s = SWAP_COLOR(COLOR_CYAN);
+
+    int n = count < STATUS_BAR_MAX_GLYPHS ? count : STATUS_BAR_MAX_GLYPHS;
+    int ids[STATUS_BAR_MAX_GLYPHS];
+    int n_ids = 0;
+    for (int i = 0; i < n; i++) {
+        int token_id = tokens[i];
+        if (token_id == 3) continue;                          // no newlines in a one-line status bar
+        if (token_id < 4 || token_id >= ZH_FONT_COUNT) continue; // skip unk/bos/eos/oob
+        ids[n_ids++] = token_id;
+    }
+
+    // Composite the background fill AND every glyph into one buffer covering
+    // the whole strip, then blit it with a single transfer. Two separate
+    // malloc+draw+free calls back to back (background clear, then a glyph
+    // strip) raced esp_lcd_panel_draw_bitmap's async transfer -- the second
+    // malloc reused the first (freed-but-still-in-flight) buffer's memory
+    // and corrupted it mid-transfer, which is exactly the noise band + torn
+    // text seen on the real device. One buffer freed only after everything
+    // is drawn into it removes that race; it also always covers the full
+    // bar width, so a shorter new status can't leave old glyphs behind.
+    uint16_t *bar_buf = (uint16_t *)malloc(STATUS_BAR_W * STATUS_BAR_H * sizeof(uint16_t));
+    if (!bar_buf) return;
+    for (int i = 0; i < STATUS_BAR_W * STATUS_BAR_H; i++) bar_buf[i] = bg_s;
+
+    int glyph_pitch = 17;
+    for (int g = 0; g < n_ids; g++) {
+        int x_off = g * glyph_pitch;
+        if (x_off + 16 > STATUS_BAR_W) break; // ran out of strip width
+        const uint8_t *glyph = zh_font_16x16[ids[g]];
+        for (int y = 0; y < 16; y++) {
+            uint8_t hi = glyph[y * 2];
+            uint8_t lo = glyph[y * 2 + 1];
+            for (int x = 0; x < 8; x++) {
+                bar_buf[(y + 2) * STATUS_BAR_W + x_off + x] = (hi & (1 << (7 - x))) ? fg_s : bg_s;
+            }
+            for (int x = 0; x < 8; x++) {
+                bar_buf[(y + 2) * STATUS_BAR_W + x_off + 8 + x] = (lo & (1 << (7 - x))) ? fg_s : bg_s;
+            }
+        }
+    }
+
+    esp_lcd_panel_draw_bitmap(panel_handle, STATUS_BAR_X, STATUS_BAR_Y,
+                               STATUS_BAR_X + STATUS_BAR_W, STATUS_BAR_Y + STATUS_BAR_H, bar_buf);
+    free(bar_buf);
 }
 
 #elif defined(CONFIG_BOARD_MODEL_SSD1306_I2C)

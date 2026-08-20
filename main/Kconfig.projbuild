@@ -45,11 +45,11 @@ menu "Board Hardware & Display Configuration"
 
         config LCD_WIDTH
             int "LCD Width in pixels"
-            default 320
+            default 240
 
         config LCD_HEIGHT
             int "LCD Height in pixels"
-            default 240
+            default 320
     endmenu
 
     menu "SSD1306 I2C Configuration"

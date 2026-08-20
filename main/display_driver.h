@@ -53,10 +53,20 @@ void display_driver_append_token(int token_id);
 
 /**
  * @brief Displays the final inference statistics card below the poem.
- * 
+ *
  * @param tk_s Tokens per second.
  */
 void display_driver_show_poem_complete(float tk_s);
+
+/**
+ * @brief Draws a status line (current 体裁/主题) in the strip below the
+ * poem card, replacing whatever was there before.
+ *
+ * @param tokens Token ids to render left to right (looked up in the same
+ * zh_font_16x16 table as the poem card; ids outside its range are skipped).
+ * @param count Number of ids in tokens.
+ */
+void display_driver_show_status(const int *tokens, int count);
 
 #ifdef __cplusplus
 }

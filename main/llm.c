@@ -989,92 +989,146 @@ int sample(Sampler *sampler, v4sf *logits)
 }
 
 // ----------------------------------------------------------------------------
-// utilities: time
-
-long time_in_ms()
-{
-    // return time in milliseconds, for benchmarking the model speed
-    struct timespec time;
-    clock_gettime(CLOCK_REALTIME, &time);
-    return time.tv_sec * 1000 + time.tv_nsec / 1000000;
-}
-
-// ----------------------------------------------------------------------------
 // generation loop
 
-void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, char *prompt, int steps, generated_complete_cb cb_done)
+// A vocab entry starting with '<' is a control token (<unk> <s> </s> or a
+// padding <extra_N>), never real poem content -- see tools/build_zh_tokenizer.py's
+// fixed ID layout. Mirrors the "special_ids" ban in tools/generate_zh_poem.py's
+// hard_length path, which exists because letting one leak into a content
+// position would inflate the token count without inflating the *character*
+// count once it's stripped from the rendered text.
+static int is_special_token(Tokenizer *t, int id)
 {
-    char *empty_prompt = "";
+    return t->vocab[id][0] == '<';
+}
+
+// Generates exactly one poem line: primes the KV cache with `prompt` (a
+// "体裁：{五言/七言}\n" header optionally followed by the previous line's
+// text -- see generate_poem_line's caller in main.c for the chaining
+// scheme), then samples new tokens with the line-ending punctuation
+// (，/。) masked out until `meter_chars` content characters have been
+// produced, at which point it is forced rather than sampled. This is the
+// same hard-length technique tools/generate_zh_poem.py uses to make meter
+// compliance exact instead of merely statistically likely (see that file's
+// generate_rhymed_poem docstring for the measured ~46-60% miss rate without it).
+//
+// is_couplet_end selects which punctuation is forced: 0 forces '，' (odd
+// line), nonzero forces '。' (even line) -- classical verse always
+// alternates the two within a couplet.
+//
+// The generated line's raw UTF-8 text (forced punctuation included, no
+// header) is written into out_buf. Returns the number of content tokens
+// generated (>=0), or -1 if the prompt failed to encode.
+int generate_poem_line(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
+                        const char *prompt, int meter_chars, int is_couplet_end,
+                        char *out_buf, size_t out_buf_cap)
+{
     if (prompt == NULL)
     {
-        prompt = empty_prompt;
+        prompt = "";
+    }
+    if (out_buf_cap > 0)
+    {
+        out_buf[0] = '\0';
     }
 
-    // encode the (string) prompt into tokens sequence
     int num_prompt_tokens = 0;
     int *prompt_tokens = (int *)malloc((strlen(prompt) + 3) * sizeof(int)); // +3 for '\0', ?BOS, ?EOS
-    encode(tokenizer, prompt, 1, 0, prompt_tokens, &num_prompt_tokens);
+    encode(tokenizer, (char *)prompt, 1, 0, prompt_tokens, &num_prompt_tokens);
     if (num_prompt_tokens < 1)
     {
-        ESP_LOGE(TAG, "something is wrong, expected at least 1 prompt token");
-        exit(EXIT_FAILURE);
+        ESP_LOGE(TAG, "generate_poem_line: expected at least 1 prompt token");
+        free(prompt_tokens);
+        return -1;
     }
 
-    // start the main loop
-    long start = 0;               // used to time our code, only initialized after first iteration
-    int next;                     // will store the next token in the sequence
+    int comma_id = str_lookup("，", tokenizer->sorted_vocab, tokenizer->vocab_size);
+    int period_id = str_lookup("。", tokenizer->sorted_vocab, tokenizer->vocab_size);
+    int forced_id = is_couplet_end ? period_id : comma_id;
+
+    size_t out_len = 0;
+    int content_tokens = 0;
+    int char_in_line = 0;
+    int next;
     int token = prompt_tokens[0]; // kick off with the first token in the prompt
     int pos = 0;                  // position in the sequence
-    while (pos < steps)
+
+    // Prompt tokens only prime the KV cache here; they are never re-echoed
+    // to stdout/display since the caller already displayed them (the header
+    // is never shown, and the previous line was shown when it was generated).
+    int max_steps = num_prompt_tokens + meter_chars * 4 + 8;
+    if (max_steps > transformer->config.seq_len)
     {
-        // forward the transformer to get logits for the next token
+        max_steps = transformer->config.seq_len;
+    }
+
+    while (pos < max_steps)
+    {
         v4sf *logits = forward(transformer, token, pos);
 
-        // advance the state machine
         if (pos < num_prompt_tokens - 1)
         {
-            // if we are still processing the input prompt, force the next prompt token
+            // still priming the prompt; force the next prompt token, nothing to emit
             next = prompt_tokens[pos + 1];
+            pos++;
+            token = next;
+            continue;
+        }
+
+        if (char_in_line >= meter_chars && forced_id >= 0)
+        {
+            // meter satisfied: force the couplet-appropriate punctuation
+            next = forced_id;
         }
         else
         {
-            // otherwise sample the next token from the logits
+            // ban premature line endings and control tokens so the line can
+            // only end exactly at meter_chars
+            if (comma_id >= 0)
+                logits[comma_id] = -INFINITY;
+            if (period_id >= 0)
+                logits[period_id] = -INFINITY;
+            for (int i = 0; i < tokenizer->vocab_size; i++)
+            {
+                if (is_special_token(tokenizer, i))
+                    logits[i] = -INFINITY;
+            }
             next = sample(sampler, logits);
         }
         pos++;
 
-        // data-dependent terminating condition: BOS (=1) or EOS (=2)
-        if (next == 1 || next == 2)
-        {
-            break;
-        }
-
-        // print the token as string, decode it with the Tokenizer object
         char *piece = decode(tokenizer, token, next);
+        if (piece && piece[0] != '\0')
+        {
+            size_t piece_len = strlen(piece);
+            if (out_len + piece_len < out_buf_cap)
+            {
+                memcpy(out_buf + out_len, piece, piece_len);
+                out_len += piece_len;
+                out_buf[out_len] = '\0';
+            }
+        }
         safe_printf(piece);
         display_driver_append_token(next);
         fflush(stdout);
         token = next;
 
-        // init the timer here because the first iteration can be slower
-        if (start == 0)
+        int is_forced_punct = (next == forced_id);
+        if (!is_forced_punct)
         {
-            start = time_in_ms();
+            char_in_line++;
         }
-    }
-    printf("\n");
+        content_tokens++;
 
-    // report achieved tok/s (pos-1 because the timer starts after first iteration)
-    if (pos > 1)
-    {
-        long end = time_in_ms();
-        float tks = (pos - 1) / (double)(end - start) * 1000;
-        fprintf(stderr, "achieved tok/s: %f\n", tks);
-        cb_done(tks);
+        if (is_forced_punct || next == 1 || next == 2)
+        {
+            // line complete (or, if the mask somehow missed it, a BOS/EOS safety exit)
+            break;
+        }
     }
 
     free(prompt_tokens);
-    ESP_LOGI(TAG, "Generate complete");
+    return content_tokens;
 }
 
 void read_stdin(const char *guide, char *buffer, size_t bufsize)
