@@ -53,7 +53,14 @@ def build_rhyme_group_index(rhyme_map, min_members=3):
             groups.setdefault(r_group, []).append(token_idx)
     return {g: ids for g, ids in groups.items() if len(ids) >= min_members}
 
-def load_pc_model_and_vocab(vocab_path="tools/vocab.json", checkpoint_bin="data/poem_model.bin"):
+TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(TOOLS_DIR)
+
+def load_pc_model_and_vocab(vocab_path=None, checkpoint_bin=None):
+    if vocab_path is None or not os.path.exists(vocab_path):
+        vocab_path = os.path.join(TOOLS_DIR, "vocab.json")
+    if checkpoint_bin is None or not os.path.exists(checkpoint_bin):
+        checkpoint_bin = os.path.join(REPO_ROOT, "data", "poem_model.bin")
     with open(vocab_path, "r", encoding="utf-8") as f:
         vocab_map = json.load(f)
     idx_to_token = {i: t for t, i in vocab_map.items()}
@@ -252,6 +259,121 @@ def generate_rhymed_poem(model, vocab_map, idx_to_token, args, rhyme_map, rhyme_
 
     full_text = "".join([idx_to_token.get(idx, "") for idx in generated[1:] if not idx_to_token.get(idx, "").startswith("<")])
     return full_text, first_rhyme_char, target_rhyme
+
+def _generate_one_line(model, vocab_map, idx_to_token, args, prompt_text, meter_chars, is_couplet_end,
+                        temperature, top_p, target_rhyme, rhyme_map, rhyme_group_index):
+    """PC-side counterpart of main/llm.c's generate_poem_line(): primes the
+    model on prompt_text (a fresh '体裁：{五言/七言}\\n' header plus the
+    previous line's raw text, or just the header for the very first line),
+    then samples one line's worth of characters with punctuation masked out
+    until meter_chars is reached, at which point '，' (is_couplet_end=False)
+    or '。' (True) is forced. Returns just the new line's text (not
+    prompt_text). Kept separate from generate_rhymed_poem because that
+    function's stopping condition (fixed total_lines / EOS) doesn't apply to
+    an unbounded chain -- here the caller decides when to stop.
+    """
+    bos_id = vocab_map.get("<s>", 1)
+    eos_id = vocab_map.get("</s>", 2)
+    unk_id = vocab_map.get("<unk>", 0)
+    comma_id = vocab_map.get("，", -1)
+    period_id = vocab_map.get("。", -1)
+    forced_id = period_id if is_couplet_end else comma_id
+    special_ids = [i for i, t in idx_to_token.items() if t.startswith('<')]
+
+    generated = [bos_id] + [vocab_map.get(c, unk_id) for c in prompt_text]
+    prompt_len = len(generated)
+    char_in_line = 0
+    max_new_tokens = meter_chars * 4 + 8
+
+    for _ in range(max_new_tokens):
+        context = generated[-args.seq_len:]
+        x = torch.tensor([context], dtype=torch.long)
+        with torch.no_grad():
+            logits, _ = model(x)
+        next_logits = logits[0, -1, :].clone()
+
+        if char_in_line >= meter_chars and forced_id >= 0:
+            next_logits = torch.full_like(next_logits, -float('inf'))
+            next_logits[forced_id] = 0.0
+        else:
+            if (target_rhyme is not None and target_rhyme > 0 and is_couplet_end
+                    and char_in_line == meter_chars - 1):
+                allowed = set(rhyme_group_index[target_rhyme])
+                for token_idx in rhyme_map:
+                    if token_idx not in allowed:
+                        next_logits[token_idx] = -float('inf')
+            if comma_id >= 0:
+                next_logits[comma_id] = -float('inf')
+            if period_id >= 0:
+                next_logits[period_id] = -float('inf')
+            for sid in special_ids:
+                next_logits[sid] = -float('inf')
+
+        if temperature > 0:
+            next_logits = next_logits / temperature
+            sorted_logits, sorted_indices = torch.sort(next_logits, descending=True)
+            cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+            sorted_indices_to_remove = cumulative_probs > top_p
+            sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+            sorted_indices_to_remove[..., 0] = 0
+            indices_to_remove = sorted_indices[sorted_indices_to_remove]
+            next_logits[indices_to_remove] = -float('inf')
+            probs = F.softmax(next_logits, dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1).item()
+        else:
+            next_token = torch.argmax(next_logits, dim=-1).item()
+
+        generated.append(next_token)
+        if next_token == forced_id:
+            break
+        if next_token in (bos_id, eos_id):
+            break
+        char_in_line += 1
+
+    line_text = "".join(idx_to_token.get(idx, "") for idx in generated[prompt_len:] if not idx_to_token.get(idx, "").startswith("<"))
+    return line_text
+
+def generate_infinite_poem(model, vocab_map, idx_to_token, args, rhyme_map, rhyme_group_index,
+                            theme="", meter_chars=5, temperature=0.75, top_p=0.9,
+                            enable_rhyme_constraint=True):
+    """Unbounded line-by-line poem generator (PC-side mirror of
+    main/llm.c's generate_poem_line() + the infinite loop in main/main.c's
+    app_main()): the previous line's text becomes the next line's prompt
+    (体裁 tag + 上一句), forever, instead of generating a whole fixed-length
+    poem in one shot. Only the very first line is seeded with `theme`; after
+    that the subject is free to drift, same as the firmware.
+
+    This is a generator so the meter can be changed *while it's running*,
+    matching the task's "运行过程中可动态调整五言/七言" requirement: send a
+    new value (5 or 7) via `gen.send(new_meter_chars)` and it takes effect
+    starting with the next line. `next(gen)` (or `gen.send(None)`) keeps the
+    current meter. Each iteration yields the newly generated line's text.
+
+    Rhyme constraint (target_rhyme fixed once at start, forced on every even
+    line, same rule as generate_rhymed_poem) is PC-only -- main/llm.c has no
+    pinyin/rhyme table on-device, so the firmware's output won't rhyme as
+    reliably as this simulator's.
+    """
+    target_rhyme = random.choice(list(rhyme_group_index.keys())) if enable_rhyme_constraint else -1
+
+    prev_line = ""
+    line_idx = 1  # 1-based; odd -> '，', even -> '。'
+    while True:
+        meter_label = "七言" if meter_chars == 7 else "五言"
+        if line_idx == 1:
+            prompt_text = f"主题：{theme} 体裁：{meter_label}\n" if theme else f"体裁：{meter_label}\n"
+        else:
+            prompt_text = f"体裁：{meter_label}\n{prev_line}"
+
+        is_couplet_end = (line_idx % 2 == 0)
+        prev_line = _generate_one_line(
+            model, vocab_map, idx_to_token, args, prompt_text, meter_chars, is_couplet_end,
+            temperature, top_p, target_rhyme, rhyme_map, rhyme_group_index)
+        line_idx += 1
+
+        sent = yield prev_line
+        if sent in (5, 7):
+            meter_chars = sent
 
 def run_pc_demonstration():
     print("=" * 68)

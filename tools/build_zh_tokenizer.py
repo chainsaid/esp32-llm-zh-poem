@@ -8,11 +8,15 @@ import os
 import struct
 import json
 from collections import Counter
-from dataset import get_training_text_samples
-
+TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(TOOLS_DIR)
 VOCAB_SIZE = 2048  # Balances ESP32-S3 memory budget against corpus char coverage (~96%)
 
-def build_tokenizer(output_bin="data/poem_tok.bin", output_json="tools/vocab.json", vocab_size=VOCAB_SIZE):
+def build_tokenizer(output_bin=None, output_json=None, vocab_size=VOCAB_SIZE):
+    if output_bin is None:
+        output_bin = os.path.join(REPO_ROOT, "data", "poem_tok.bin")
+    if output_json is None:
+        output_json = os.path.join(TOOLS_DIR, "vocab.json")
     # Special tokens
     special_tokens = ["<unk>", "<s>", "</s>", "\n"]
     punctuations = ["，", "。", "！", "？", "、", "；", "：", "《", "》", " ", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]

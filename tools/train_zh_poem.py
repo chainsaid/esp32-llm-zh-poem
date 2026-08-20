@@ -15,6 +15,9 @@ from build_zh_tokenizer import build_tokenizer
 from dataset import get_training_text_samples
 from export_zh_model import export_model
 
+TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(TOOLS_DIR)
+
 # Hyperparameters
 SEED = 1337
 BATCH_SIZE = 32
@@ -245,19 +248,16 @@ def train():
         print(generated_poem)
         print("-------------------------------\n")
 
-    # 5. Save raw PyTorch checkpoint (enables resuming/re-exporting later;
-    # export_model always converts to float32 regardless of this dtype).
-    # Deliberately NOT under data/: main/CMakeLists.txt's
-    # spiffs_create_partition_image bundles that whole directory into the
-    # 4MB SPIFFS image verbatim, and this ~2.9MB checkpoint sitting next to
-    # poem_model.bin pushed the image over the partition size and broke the
-    # firmware build (SpiffsFullError).
-    os.makedirs("checkpoints", exist_ok=True)
-    torch.save(model.state_dict(), "checkpoints/poem_model.pt")
-    print("Saved PyTorch checkpoint to checkpoints/poem_model.pt")
+    # 5. Save raw PyTorch checkpoint
+    ckpt_dir = os.path.join(REPO_ROOT, "checkpoints")
+    os.makedirs(ckpt_dir, exist_ok=True)
+    ckpt_file = os.path.join(ckpt_dir, "poem_model.pt")
+    torch.save(model.state_dict(), ckpt_file)
+    print(f"Saved PyTorch checkpoint to {ckpt_file}")
 
     # 6. Export binary model
-    export_model(model, "data/poem_model.bin")
+    export_bin = os.path.join(REPO_ROOT, "data", "poem_model.bin")
+    export_model(model, export_bin)
     print("Model and Tokenizer exported to data/ ready for ESP32-S3 deployment!")
 
 if __name__ == "__main__":
